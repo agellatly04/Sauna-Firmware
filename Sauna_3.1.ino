@@ -5,6 +5,9 @@
 #include <IRsend.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClientSecureBearSSL.h>
+#include <ESP8266httpUpdate.h>
 
 // Configuration
 const char* ssid = "Wi-Fi 6"; //"Netgear32"
@@ -13,6 +16,7 @@ const uint16_t IR_SEND_PIN = 5;
 const int ONE_WIRE_BUS = 0;  // DS18B20 data pin (can use any digital pin)
 const float TEMP_THRESHOLD = 115.0;  // Temperature threshold for power reduction
 const unsigned long CHECK_INTERVAL = 30000;  // Check temperature every 20 seconds
+const unsigned long UPDATE_INTERVAL = 3600000; // Check for updates every hour
 
 // Setup OneWire and DallasTemperature instances
 OneWire oneWire(ONE_WIRE_BUS);
@@ -36,6 +40,26 @@ int timeSetting = 45;
 unsigned long saunaStartTime = 0;
 float currentTemp = 0.0;
 unsigned long lastTempCheck = 0;  // For tracking temperature check interval
+unsigned long lastUpdateCheck = 0; // For tracking OTA update interval
+
+void checkForUpdates() {
+  WiFiClientSecure client;
+  client.setInsecure();  // Disable SSL verification for simplicity
+  t_httpUpdate_return result = ESPhttpUpdate.update(client, "https://raw.githubusercontent.com/agellatly04/Sauna-Firmware/refs/heads/main/Sauna_3.1.ino");
+  
+  switch (result) {
+    case HTTP_UPDATE_FAILED:
+      Serial.printf("Update failed! Error (%d): %s\n", ESPhttpUpdate.getLastError(), ESPhttpUpdate.getLastErrorString().c_str());
+      break;
+    case HTTP_UPDATE_NO_UPDATES:
+      Serial.println("No new updates available.");
+      break;
+    case HTTP_UPDATE_OK:
+      Serial.println("Update successful! Rebooting...");
+      ESP.restart();
+      break;
+  }
+}
 
 // Function to read temperature from DS18B20
 float readTemperature() {
@@ -212,6 +236,9 @@ const char webPage[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
+// Forward declaration
+void handleCommand();
+
 void setup() {
   Serial.begin(115200);  // Initialize serial communication
   Serial.println("\nStarting up...");
@@ -220,10 +247,7 @@ void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, HIGH);
 
-
-
-  
-  // Start up the DS18B20 library
+  // Start up the DS18B20 library (only call sensors.begin() once)
   sensors.begin();
   
   WiFi.begin(ssid, password);
@@ -244,12 +268,12 @@ void setup() {
     Serial.println("mDNS responder started");
   }
 
-
-
-    
   server.on("/", []() { server.send_P(200, "text/html", webPage); });
   server.on("/cmd", handleCommand);
   server.begin();
+
+  // Check for OTA updates at startup
+  checkForUpdates();
 }
 
 void handleCommand() {
@@ -316,25 +340,27 @@ void handleCommand() {
                        ",\"time\":" + String(timeSetting) + 
                        ",\"elapsed\":\"" + elapsed + "\"" +
                        ",\"temp\":" + String(currentTemp, 1) + "}";
+
   server.send(200, "application/json", jsonResponse);
 }
 
 void loop() {
-  // Add mDNS update
   MDNS.update();
-  
   server.handleClient();
   
   // Check temperature every 20 seconds
   if (saunaOn && millis() - lastTempCheck >= CHECK_INTERVAL) {
     currentTemp = readTemperature();
-    
-    // If temperature is above threshold and power isn't at minimum, reduce power
     if (currentTemp >= TEMP_THRESHOLD && powerLevel > 0) {
       powerLevel--;
       irsend.sendNEC(IR_SIGNALS[2], 32);
     }
-    
     lastTempCheck = millis();
+  }
+  
+  // Check for updates every hour
+  if (millis() - lastUpdateCheck >= UPDATE_INTERVAL) {
+    checkForUpdates();
+    lastUpdateCheck = millis();
   }
 }
